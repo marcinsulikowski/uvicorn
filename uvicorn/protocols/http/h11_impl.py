@@ -182,6 +182,7 @@ class H11Protocol(asyncio.Protocol):
                 self.send_400_response(msg)
                 return
 
+            self.logger.log(TRACE_LOG_LEVEL, "Processing H11 event %s", event)
             if event is h11.NEED_DATA:
                 break
 
@@ -253,7 +254,12 @@ class H11Protocol(asyncio.Protocol):
                     message_event=asyncio.Event(),
                     on_response=self.on_response_complete,
                 )
+                self.logger.log(TRACE_LOG_LEVEL, "self.cycle set to %s", self.cycle)
+                self.logger.log(TRACE_LOG_LEVEL, "start task %s", full_path)
                 task = self.loop.create_task(self.cycle.run_asgi(app))
+                task.add_done_callback(
+                    lambda task, fp=full_path: self.logger.log(TRACE_LOG_LEVEL, "done  task %s", fp)
+                )
                 task.add_done_callback(self.tasks.discard)
                 self.tasks.add(task)
 
@@ -404,9 +410,11 @@ class RequestResponseCycle:
     # ASGI exception wrapper
     async def run_asgi(self, app: ASGI3Application) -> None:
         try:
+            self.logger.log(TRACE_LOG_LEVEL, "run_asgi start path=%s", self.scope.get("path"))
             result = await app(  # type: ignore[func-returns-value]
                 self.scope, self.receive, self.send
             )
+            self.logger.log(TRACE_LOG_LEVEL, "run_asgi end   path=%s result=%s", self.scope.get("path"), result)
         except BaseException as exc:
             msg = "Exception in ASGI application\n"
             self.logger.error(msg, exc_info=exc)
@@ -449,6 +457,7 @@ class RequestResponseCycle:
 
     # ASGI interface
     async def send(self, message: ASGISendEvent) -> None:
+        self.logger.log(TRACE_LOG_LEVEL, "UVI send message=%s", message)
         message_type = message["type"]
 
         if self.flow.write_paused and not self.disconnected:
@@ -523,16 +532,24 @@ class RequestResponseCycle:
             self.on_response()
 
     async def receive(self) -> ASGIReceiveEvent:
+        self.logger.log(TRACE_LOG_LEVEL, "UVI receive - begin")
+        self.logger.log(TRACE_LOG_LEVEL, "UVI receive - self.waiting_for_100_continue=%s", self.waiting_for_100_continue)
+        self.logger.log(TRACE_LOG_LEVEL, "UVI receive - self.disconnected=%s", self.disconnected)
+        self.logger.log(TRACE_LOG_LEVEL, "UVI receive - self.response_complete=%s", self.response_complete)
         if self.waiting_for_100_continue and not self.transport.is_closing():
+            self.logger.log(TRACE_LOG_LEVEL, "UVI receive - 100 continue")
             headers: list[tuple[str, str]] = []
             event = h11.InformationalResponse(status_code=100, headers=headers, reason="Continue")
+            self.logger.log(TRACE_LOG_LEVEL, "UVI receive - send event %s", event)
             output = self.conn.send(event=event)
             self.transport.write(output)
             self.waiting_for_100_continue = False
 
         if not self.disconnected and not self.response_complete:
             self.flow.resume_reading()
+            self.logger.log(TRACE_LOG_LEVEL, "UVI receive - wait for message")
             await self.message_event.wait()
+            self.logger.log(TRACE_LOG_LEVEL, "UVI receive - message received")
             self.message_event.clear()
 
         if self.disconnected or self.response_complete:
@@ -544,4 +561,5 @@ class RequestResponseCycle:
             "more_body": self.more_body,
         }
         self.body = b""
+        self.logger.log(TRACE_LOG_LEVEL, "UVI receive message=%s", message)
         return message

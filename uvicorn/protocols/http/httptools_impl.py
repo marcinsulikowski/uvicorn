@@ -287,14 +287,20 @@ class HttpToolsProtocol(asyncio.Protocol):
             keep_alive=http_version != "1.0",
             on_response=self.on_response_complete,
         )
+        self.logger.log(TRACE_LOG_LEVEL, "UVI created cycle path=%s", full_path)
         if existing_cycle is None or existing_cycle.response_complete:
             # Standard case - start processing the request.
+            self.logger.log(TRACE_LOG_LEVEL, "UVI starting immediate cycle path=%s", full_path)
             task = self.loop.create_task(self.cycle.run_asgi(app))
+            task.add_done_callback(
+                lambda task, fp=full_path: self.logger.log(TRACE_LOG_LEVEL, "UVI done immediate cycle path=%s", fp)
+            )
             task.add_done_callback(self.tasks.discard)
             self.tasks.add(task)
         else:
             # Pipelined HTTP requests need to be queued up.
             self.flow.pause_reading()
+            self.logger.log(TRACE_LOG_LEVEL, "UVI queueing cycle path=%s", full_path)
             self.pipeline.appendleft((self.cycle, app))
 
     def on_body(self, body: bytes) -> None:
@@ -327,7 +333,11 @@ class HttpToolsProtocol(asyncio.Protocol):
         # Keep-Alive timeout instead.
         if self.pipeline:
             cycle, app = self.pipeline.pop()
+            self.logger.log(TRACE_LOG_LEVEL, "UVI starting pipelined cycle path=%s", cycle.scope.get("path"))
             task = self.loop.create_task(cycle.run_asgi(app))
+            task.add_done_callback(
+                lambda task, fp=cycle.scope.get("path"): self.logger.log(TRACE_LOG_LEVEL, "UVI done pipelined cycle path=%s", fp)
+            )
             task.add_done_callback(self.tasks.discard)
             self.tasks.add(task)
         else:
@@ -408,9 +418,11 @@ class RequestResponseCycle:
     # ASGI exception wrapper
     async def run_asgi(self, app: ASGI3Application) -> None:
         try:
+            self.logger.log(TRACE_LOG_LEVEL, "UVI run_asgi start path=%s", self.scope.get("path"))
             result = await app(  # type: ignore[func-returns-value]
                 self.scope, self.receive, self.send
             )
+            self.logger.log(TRACE_LOG_LEVEL, "UVI run_asgi end   path=%s result=%s", self.scope.get("path"), result)
         except BaseException as exc:
             msg = "Exception in ASGI application\n"
             self.logger.error(msg, exc_info=exc)
